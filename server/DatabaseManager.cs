@@ -34,6 +34,8 @@ public static class DatabaseManager
         var result = new StringBuilder();
 
         // Get Tables
+        var tables = new List<string>();
+
         await using (var tablesCmd = conn.CreateCommand())
         {
             tablesCmd.CommandText = @"
@@ -43,36 +45,36 @@ public static class DatabaseManager
 
             tablesCmd.Parameters.AddWithValue("@db", databaseName);
 
-            var tables = new List<string>();
 
             await using var reader = await tablesCmd.ExecuteReaderAsync();
             while (await reader.ReadAsync())
                 tables.Add(reader.GetString(0));
 
             result.AppendLine("=== TABLES ===");
+        }
 
-            foreach (var table in tables)
+        foreach (var table in tables)
+        {
+            result.AppendLine($"\nTable: {table}");
+
+            // Columns
+            await using var columnCmd = conn.CreateCommand();
+            columnCmd.CommandText = @"
+                SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = @db AND TABLE_NAME = @table;";
+            columnCmd.Parameters.AddWithValue("@db", databaseName);
+            columnCmd.Parameters.AddWithValue("@table", table);
+
+            await using var columnReader = await columnCmd.ExecuteReaderAsync();
+            result.AppendLine("  Columns:");
+            while (await columnReader.ReadAsync())
             {
-                result.AppendLine($"\nTable: {table}");
-
-                // Columns
-                await using var columnCmd = conn.CreateCommand();
-                columnCmd.CommandText = @"
-                    SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE
-                    FROM INFORMATION_SCHEMA.COLUMNS
-                    WHERE TABLE_SCHEMA = @db AND TABLE_NAME = @table;";
-                columnCmd.Parameters.AddWithValue("@db", databaseName);
-                columnCmd.Parameters.AddWithValue("@table", table);
-
-                await using var columnReader = await columnCmd.ExecuteReaderAsync();
-                result.AppendLine("  Columns:");
-                while (await columnReader.ReadAsync())
-                {
-                    result.AppendLine(
-                        $"    - {columnReader.GetString(0)} ({columnReader.GetString(1)}) Nullable: {columnReader.GetString(2)}");
-                }
+                result.AppendLine(
+                    $"    - {columnReader.GetString(0)} ({columnReader.GetString(1)}) Nullable: {columnReader.GetString(2)}");
             }
         }
+        
 
         // Primary Keys
         await using (var pkCmd = conn.CreateCommand())
@@ -134,22 +136,71 @@ public static class DatabaseManager
         [Description("The name of the database to execute the query on.")] string databaseName,
         [Description("The SQL SELECT query to execute.")] string sqlQuery)
     {
-        // In a real implementation, this method would connect to a database server, execute the provided SQL query, and return the results.
-        // For this example, we'll return hardcoded results for the provided query.
+        DatabaseHelper.ValidateSelectQuery(sqlQuery);
 
-        await Task.Delay(100); // Simulate async work
+        DatabaseHelper dbHelper = DatabaseHelper.GetInstance();
+        await using var conn = await dbHelper.OpenConnectionAsync();
+        await using var cmd = conn.CreateCommand();
 
-        return $"""
-            Executing query on {databaseName}:
-            {sqlQuery}
+        cmd.CommandText = $"USE {databaseName}; {sqlQuery}";
 
-            Results:
-            ID | Name | Age
-            -----------------
-            1  | Alice | 30
-            2  | Bob   | 25
-            3  | Carol | 28
-            ... (additional results would go here)
-            """;
+        await using var reader = await cmd.ExecuteReaderAsync();
+
+        return await FormatResultsAsync(reader);
+    }
+
+    private static async Task<string> FormatResultsAsync(MySqlDataReader reader)
+    {
+        var sb = new StringBuilder();
+
+        do
+        {
+            if (reader.FieldCount == 0)
+                continue;
+
+            // ── Header ──────────────────────────────────────────────────────
+            var columns = Enumerable
+                .Range(0, reader.FieldCount)
+                .Select(i => reader.GetName(i))
+                .ToList();
+
+            int[] widths = columns.Select(c => c.Length).ToArray();
+
+            var rows = new List<string[]>();
+
+            while (await reader.ReadAsync())
+            {
+                var row = new string[reader.FieldCount];
+                for (int i = 0; i < reader.FieldCount; i++)
+                {
+                    row[i] = reader.IsDBNull(i) ? "NULL" : reader.GetValue(i)!.ToString()!;
+                    widths[i] = Math.Max(widths[i], row[i].Length);
+                }
+                rows.Add(row);
+            }
+
+            // ── Render ───────────────────────────────────────────────────────
+            string separator = "+-" + string.Join("-+-", widths.Select(w => new string('-', w))) + "-+";
+
+            sb.AppendLine(separator);
+            sb.AppendLine("| " + string.Join(" | ", columns.Select((c, i) => c.PadRight(widths[i]))) + " |");
+            sb.AppendLine(separator);
+
+            if (rows.Count == 0)
+            {
+                sb.AppendLine("| (no rows) |");
+            }
+            else
+            {
+                foreach (var row in rows)
+                    sb.AppendLine("| " + string.Join(" | ", row.Select((v, i) => v.PadRight(widths[i]))) + " |");
+            }
+
+            sb.AppendLine(separator);
+            sb.AppendLine($"  {rows.Count} row(s)");
+
+        } while (await reader.NextResultAsync()); // handles multiple result sets
+
+        return sb.Length > 0 ? sb.ToString() : "(query returned no results)";
     }
 }
