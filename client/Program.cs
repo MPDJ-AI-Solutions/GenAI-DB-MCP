@@ -45,6 +45,7 @@ Console.WriteLine("MCP Client Started!");
 
 PromptForInput();
 
+var chatHistory = new List<ChatMessage>{ new(ChatRole.System, "You are a helpful assistant that can use MCP tools with MySQL databases.") };
 while(Console.ReadLine() is string query && !"exit".Equals(query, StringComparison.OrdinalIgnoreCase))
 {
     if (string.IsNullOrWhiteSpace(query))
@@ -55,13 +56,27 @@ while(Console.ReadLine() is string query && !"exit".Equals(query, StringComparis
 
     try
     {
-        var message = await anthropicClient.GetResponseAsync(query, options);
+        chatHistory.Add(new ChatMessage(ChatRole.User, query));
+
+        var limitedHistory = BuildWindowedHistory(chatHistory, maxCharacters: 4000);
         
+        var messageTask = anthropicClient.GetResponseAsync(limitedHistory, options);
+        while(messageTask.IsCompleted is false)
+        {
+            PrintThinkingAnimation();
+        }
+        var message = await messageTask;
+
         Console.ForegroundColor = ConsoleColor.DarkYellow;
         Console.Write(message);
 
+        chatHistory.Add(new ChatMessage(ChatRole.Assistant, message.Text));
+        await File.WriteAllTextAsync(
+            "chat_history_"+DateTime.Now.ToString("yyyyMMdd_HHmmss")+".json", 
+            JsonSerializer.Serialize(chatHistory, new JsonSerializerOptions { WriteIndented = true })
+        );
     }
-    catch (JsonException  ex)
+    catch (JsonException ex)
     {
         Console.ForegroundColor = ConsoleColor.Red;
         Console.WriteLine($"\n[JSON Error] Raw content that failed: '{ex.Message}'");
@@ -85,4 +100,53 @@ static void PromptForInput()
     Console.ResetColor();
     Console.WriteLine("Enter a command (or 'exit' to quit):");
     Console.Write("> ");
+}
+
+static void PrintThinkingAnimation()
+{
+    var animation = new[] { "", ".", "..", "..." };
+    for (int i = 0; i < 4; i++)
+    {
+        Console.Write($"\rThinking{animation[i]}");
+        Thread.Sleep(250);
+    }
+    Console.Write("\r                \r");
+}
+
+static List<ChatMessage> BuildWindowedHistory(
+    List<ChatMessage> history,
+    int maxCharacters)
+{
+    var result = new List<ChatMessage>();
+
+    var systemMessages = history
+        .Where(m => m.Role == ChatRole.System)
+        .ToList();
+
+    result.AddRange(systemMessages);
+
+    int currentCharacters = systemMessages.Sum(m => m.Text?.Length ?? 0);
+
+    var temp = new List<ChatMessage>();
+    for (int i = history.Count - 1; i >= 0; i--)
+    {
+        var msg = history[i];
+
+        if (msg.Role == ChatRole.System)
+            continue;
+
+        var textLength = msg.Text?.Length ?? 0;
+
+        if (currentCharacters + textLength > maxCharacters)
+            break;
+
+        temp.Add(msg);
+        currentCharacters += textLength;
+    }
+
+    // Restore chronological order
+    temp.Reverse();
+    result.AddRange(temp);
+
+    return result;
 }
