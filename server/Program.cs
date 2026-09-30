@@ -9,7 +9,7 @@ builder.Services.AddMcpServer()
     .WithStdioServerTransport()
     .WithToolsFromAssembly();
 
-DatabaseManager.Tools.DatabaseHelper.Initialize("Server=localhost;User=mcp;Password=1234;");
+DatabaseManager.Tools.DatabaseHelper.Initialize("Server=<insert_server>;User=mcp;Password=<inser_password>;");
 
 var app = builder.Build();
 
